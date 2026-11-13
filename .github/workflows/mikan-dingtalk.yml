@@ -59,7 +59,7 @@ jobs:
           fi
           
           # 推送最近的 5 条简体资源
-          RECENT_TITLES=$(echo "$ALL_TITLES" | tail -n 5)
+          RECENT_TITLES=$(echo "$ALL_TITLES" | head -n 5)
           
           JSON_DATA=$(cat <<EOF
           {
