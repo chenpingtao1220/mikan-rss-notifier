@@ -1,0 +1,88 @@
+name: Mikan RSS DingTalk Notify
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # 每 2 小时检查一次（UTC 时间）
+  workflow_dispatch:          # 允许手动点击运行，方便测试
+
+jobs:
+  check-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch RSS and Push to DingTalk
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          MIKAN_RSS_URLS: ${{ secrets.MIKAN_RSS_URLS }}
+          LAST_RUN_FILE: ${{ secrets.LAST_RUN_FILE }}
+        run: |
+          set -e
+          
+          if [ -f "$LAST_RUN_FILE" ]; then
+            PREVIOUS_HASH=$(cat "$LAST_RUN_FILE")
+          else
+            PREVIOUS_HASH=""
+          fi
+          
+          ALL_TITLES=""
+          IFS=',' read -ra URLS <<< "$MIKAN_RSS_URLS"
+          for URL in "${URLS[@]}"; do
+            URL=$(echo "$URL" | xargs)
+            if [ -z "$URL" ]; then continue; fi
+            # 提取标题
+            TITLES=$(curl -s -L "$URL" | grep -oP '(?<=<title>).*?(?=</title>)' | tail -n +2)
+            while IFS= read -r TITLE; do
+              if [ -n "$TITLE" ]; then
+                # 👇 核心过滤逻辑：只有当标题包含“简”字（简日/简繁/简体）时才保留
+                if [[ "$TITLE" == *"简"* ]]; then
+                  ALL_TITLES+="$TITLE"$'\n'
+                fi
+              fi
+            done <<< "$TITLES"
+          done
+          
+          # 如果过滤后啥都没有，直接退出
+          if [ -z "$ALL_TITLES" ]; then
+            echo "没有包含简体字幕的更新。"
+            exit 0
+          fi
+
+          CURRENT_HASH=$(echo "$ALL_TITLES" | sha256sum | awk '{print $1}')
+          
+          if [ "$CURRENT_HASH" = "$PREVIOUS_HASH" ]; then
+            echo "没有发现新的简体更新，跳过推送。"
+            exit 0
+          fi
+          
+          # 推送最近的 5 条简体资源
+          RECENT_TITLES=$(echo "$ALL_TITLES" | tail -n 5)
+          
+          JSON_DATA=$(cat <<EOF
+          {
+            "msgtype": "text",
+            "text": {
+              "content": "【蜜柑更新: 简体资源】\n\n$RECENT_TITLES\n\n请前往蜜柑计划查看。"
+            }
+          }
+          EOF
+          )
+          
+          curl -s -X POST "$DINGTALK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$JSON_DATA"
+          
+          echo "推送已发送。"
+          
+          echo "$CURRENT_HASH" > "$LAST_RUN_FILE"
+          
+      - name: Commit and push last run record
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ secrets.LAST_RUN_FILE }}"
+          git commit -m "Update last run record [skip ci]" || echo "No changes to commit"
+          git push
