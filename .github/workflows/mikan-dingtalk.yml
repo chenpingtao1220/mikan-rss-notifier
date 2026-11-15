@@ -2,8 +2,8 @@ name: Mikan RSS DingTalk Notify
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 每 2 小时检查一次（UTC 时间）
-  workflow_dispatch:          # 允许手动点击运行，方便测试
+    - cron: '0 */2 * * *'   # 每 2 小时检查一次
+  workflow_dispatch:          # 允许手动点击运行
 
 jobs:
   check-and-notify:
@@ -18,54 +18,49 @@ jobs:
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           MIKAN_RSS_URLS: ${{ secrets.MIKAN_RSS_URLS }}
-          LAST_RUN_FILE: ${{ secrets.LAST_RUN_FILE }}
         run: |
           set -e
           
-          if [ -f "$LAST_RUN_FILE" ]; then
-            PREVIOUS_HASH=$(cat "$LAST_RUN_FILE")
+          # 1. 先拉取最新的仓库代码，防止冲突
+          git pull --rebase
+          
+          # 2. 读取之前保存的历史标题
+          if [ -f "last_run.txt" ]; then
+            PREVIOUS_TITLES=$(cat last_run.txt)
           else
-            PREVIOUS_HASH=""
+            PREVIOUS_TITLES=""
           fi
           
-          ALL_TITLES=""
+          NEW_TITLES=""
           IFS=',' read -ra URLS <<< "$MIKAN_RSS_URLS"
           for URL in "${URLS[@]}"; do
             URL=$(echo "$URL" | xargs)
             if [ -z "$URL" ]; then continue; fi
-            # 提取标题
             TITLES=$(curl -s -L "$URL" | grep -oP '(?<=<title>).*?(?=</title>)' | tail -n +2)
             while IFS= read -r TITLE; do
               if [ -n "$TITLE" ]; then
-                # 👇 核心过滤逻辑：只有当标题包含“简”字（简日/简繁/简体）时才保留
-                if [[ "$TITLE" == *"简"* ]]; then
-                  ALL_TITLES+="$TITLE"$'\n'
+                # 3. 核心逻辑：必须包含“简”，并且不在历史记录里
+                if [[ "$TITLE" == *"简"* ]] && [[ "$PREVIOUS_TITLES" != *"$TITLE"* ]]; then
+                  NEW_TITLES+="$TITLE"$'\n'
                 fi
               fi
             done <<< "$TITLES"
           done
           
-          # 如果过滤后啥都没有，直接退出
-          if [ -z "$ALL_TITLES" ]; then
-            echo "没有包含简体字幕的更新。"
+          # 4. 如果抓完发现没有新的，直接结束
+          if [ -z "$NEW_TITLES" ]; then
+            echo "没有发现真正的新简体资源，跳过推送。"
             exit 0
           fi
 
-          CURRENT_HASH=$(echo "$ALL_TITLES" | sha256sum | awk '{print $1}')
-          
-          if [ "$CURRENT_HASH" = "$PREVIOUS_HASH" ]; then
-            echo "没有发现新的简体更新，跳过推送。"
-            exit 0
-          fi
-          
-          # 推送最近的 5 条简体资源
-          RECENT_TITLES=$(echo "$ALL_TITLES" | head -n 5)
+          # 5. 只发新的
+          RECENT_TITLES=$(echo "$NEW_TITLES" | head -n 5)
           
           JSON_DATA=$(cat <<EOF
           {
             "msgtype": "text",
             "text": {
-              "content": "【蜜柑更新: 简体资源】\n\n$RECENT_TITLES\n\n请前往蜜柑计划查看。"
+              "content": "【蜜柑更新: 新简体资源】\n\n$RECENT_TITLES\n\n请前往蜜柑计划查看。"
             }
           }
           EOF
@@ -77,12 +72,15 @@ jobs:
           
           echo "推送已发送。"
           
-          echo "$CURRENT_HASH" > "$LAST_RUN_FILE"
+          # 6. 把最新的50条标题存入 last_run.txt
+          echo "$PREVIOUS_TITLES" > last_run.txt
+          echo "$NEW_TITLES" >> last_run.txt
+          head -n 50 last_run.txt > last_run_temp.txt && mv last_run_temp.txt last_run.txt
           
       - name: Commit and push last run record
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ secrets.LAST_RUN_FILE }}"
+          git add last_run.txt
           git commit -m "Update last run record [skip ci]" || echo "No changes to commit"
-          git push
+          git push origin HEAD:${{ github.ref }}
