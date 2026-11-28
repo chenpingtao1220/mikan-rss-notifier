@@ -2,8 +2,8 @@ name: Mikan RSS DingTalk Notify
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 每 2 小时检查一次
-  workflow_dispatch:          # 允许手动点击运行
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
 
 jobs:
   check-and-notify:
@@ -11,8 +11,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # 1. 从缓存恢复
+      - name: Restore last run state
+        uses: actions/cache/restore@v4
         with:
-          fetch-depth: 0
+          path: last_run.txt
+          key: last-run-${{ github.run_id }}
+          restore-keys: |
+            last-run-
 
       - name: Fetch RSS and Push to DingTalk
         env:
@@ -21,10 +28,6 @@ jobs:
         run: |
           set -e
           
-          # 1. 先拉取最新的仓库代码，防止冲突
-          git pull --rebase
-          
-          # 2. 读取之前保存的历史标题
           if [ -f "last_run.txt" ]; then
             PREVIOUS_TITLES=$(cat last_run.txt)
           else
@@ -39,7 +42,6 @@ jobs:
             TITLES=$(curl -s -L "$URL" | grep -oP '(?<=<title>).*?(?=</title>)' | tail -n +2)
             while IFS= read -r TITLE; do
               if [ -n "$TITLE" ]; then
-                # 3. 核心逻辑：必须包含“简”，并且不在历史记录里
                 if [[ "$TITLE" == *"简"* ]] && [[ "$PREVIOUS_TITLES" != *"$TITLE"* ]]; then
                   NEW_TITLES+="$TITLE"$'\n'
                 fi
@@ -47,13 +49,11 @@ jobs:
             done <<< "$TITLES"
           done
           
-          # 4. 如果抓完发现没有新的，直接结束
           if [ -z "$NEW_TITLES" ]; then
             echo "没有发现真正的新简体资源，跳过推送。"
             exit 0
           fi
 
-          # 5. 只发新的
           RECENT_TITLES=$(echo "$NEW_TITLES" | head -n 5)
           
           JSON_DATA=$(cat <<EOF
@@ -66,21 +66,16 @@ jobs:
           EOF
           )
           
-          curl -s -X POST "$DINGTALK_WEBHOOK" \
-            -H "Content-Type: application/json" \
-            -d "$JSON_DATA"
-          
+          curl -s -X POST "$DINGTALK_WEBHOOK" -H "Content-Type: application/json" -d "$JSON_DATA"
           echo "推送已发送。"
           
-          # 6. 把最新的50条标题存入 last_run.txt
           echo "$PREVIOUS_TITLES" > last_run.txt
           echo "$NEW_TITLES" >> last_run.txt
           head -n 50 last_run.txt > last_run_temp.txt && mv last_run_temp.txt last_run.txt
-          
-      - name: Commit and push last run record
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_run.txt
-          git commit -m "Update last run record [skip ci]" || echo "No changes to commit"
-          git push origin HEAD:${{ github.ref }}
+
+      # 2. 存入缓存
+      - name: Save last run state
+        uses: actions/cache/save@v4
+        with:
+          path: last_run.txt
+          key: last-run-${{ github.run_id }}
