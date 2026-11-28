@@ -2,8 +2,8 @@ name: Mikan RSS DingTalk Notify
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 每 2 小时检查一次
-  workflow_dispatch:          # 允许手动点击运行
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
 
 jobs:
   check-and-notify:
@@ -11,15 +11,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # 1. 从缓存中恢复上次运行的备忘录 (彻底摆脱 git push 失败的问题)
-      - name: Restore last run state
-        uses: actions/cache/restore@v4
         with:
-          path: last_run.txt
-          key: last-run-${{ github.run_id }}
-          restore-keys: |
-            last-run-
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Fetch RSS and Push to DingTalk
         env:
@@ -28,7 +21,6 @@ jobs:
         run: |
           set -e
           
-          # 读取历史备忘录
           if [ -f "last_run.txt" ]; then
             PREVIOUS_TITLES=$(cat last_run.txt)
           else
@@ -40,15 +32,12 @@ jobs:
           for URL in "${URLS[@]}"; do
             URL=$(echo "$URL" | xargs)
             if [ -z "$URL" ]; then continue; fi
-            # 抓取并提取标题
             TITLES=$(curl -s -L "$URL" | grep -oP '(?<=<title>).*?(?=</title>)' | tail -n +2)
             while IFS= read -r TITLE; do
               if [ -n "$TITLE" ]; then
-                # 核心魔法：清理掉所有标点、特殊符号和空格，只保留纯文本进行比对
                 CLEAN_TITLE=$(echo "$TITLE" | tr -d '[:punct:] [:space:]')
                 CLEAN_PREVIOUS=$(echo "$PREVIOUS_TITLES" | tr -d '[:punct:] [:space:]')
                 
-                # 必须包含“简”，且不在历史备忘录中
                 if [[ "$TITLE" == *"简"* ]] && [[ "$CLEAN_PREVIOUS" != *"$CLEAN_TITLE"* ]]; then
                   NEW_TITLES+="$TITLE"$'\n'
                 fi
@@ -56,13 +45,11 @@ jobs:
             done <<< "$TITLES"
           done
           
-          # 如果没有新番，直接安静退出
           if [ -z "$NEW_TITLES" ]; then
             echo "没有发现真正的新简体资源，跳过推送。"
             exit 0
           fi
 
-          # 提取最新的 5 条发送
           RECENT_TITLES=$(echo "$NEW_TITLES" | head -n 5)
           
           JSON_DATA=$(cat <<EOF
@@ -78,14 +65,13 @@ jobs:
           curl -s -X POST "$DINGTALK_WEBHOOK" -H "Content-Type: application/json" -d "$JSON_DATA"
           echo "推送已发送。"
           
-          # 🌟 终极修复：新的放前面，旧的放后面，然后只保留最新的 500 条！
           echo "$NEW_TITLES" > last_run.txt
           echo "$PREVIOUS_TITLES" >> last_run.txt
           head -n 500 last_run.txt > last_run_temp.txt && mv last_run_temp.txt last_run.txt
 
-      # 2. 将最新的备忘录存入 GitHub 缓存
-      - name: Save last run state
-        uses: actions/cache/save@v4
+      # 使用专用的 Action 提交文件，绝对不会出错
+      - name: Commit and push last run record
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          path: last_run.txt
-          key: last-run-${{ github.run_id }}
+          commit_message: "Update last_run.txt [skip ci]"
+          file_pattern: last_run.txt
